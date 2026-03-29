@@ -651,6 +651,7 @@ impl RouterTimelock {
         let mut pending = Vec::new(&env);
         for id in 0..next_id {
             if let Some(op) = env.storage().instance().get::<DataKey, TimelockOp>(&DataKey::Operation(id)) {
+            if let Some(op) = env.storage().instance().get::<_, Operation>(&DataKey::Operation(id)) {
                 if !op.executed && !op.cancelled {
                     pending.push_back(op);
                 }
