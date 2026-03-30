@@ -356,16 +356,26 @@ impl RouterRegistry {
     /// # Errors
     /// * [`RegistryError::Unauthorized`] — if `current` is not the admin.
     /// * [`RegistryError::NotInitialized`] — if the contract has not been initialized.
-    pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), RegistryError> {
-        current.require_auth();
-        Self::require_admin(&env, &current)?;
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.events().publish(
-            (Symbol::new(&env, "admin_transferred"),),
-            (current, new_admin),
-        );
-        Ok(())
-    }
+    pub fn transfer_admin(env: Env, current: Address, new_admin: Address) -> Result<(), MiddlewareError> {
+    current.require_auth();
+
+    // One-liner using the shared macro
+    router_common::require_admin_simple!(
+        &env,
+        &current,
+        &DataKey::Admin,
+        MiddlewareError
+    )?;
+
+    env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+    env.events().publish(
+        (Symbol::new(&env, "admin_transferred"),),
+        (current, new_admin),
+    );
+
+    Ok(())
+}
 
     /// Get the current admin.
     ///
