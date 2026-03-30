@@ -68,6 +68,7 @@ pub enum TimelockError {
     NotCriticalOp = 14,
     InvalidConfig = 15,
     InvalidTarget = 16,
+    InvalidDescription = 17,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -150,6 +151,10 @@ impl RouterTimelock {
 
         if delay < min_delay {
             return Err(TimelockError::InvalidDelay);
+        }
+
+        if description.len() == 0 {
+            return Err(TimelockError::InvalidDescription);
         }
 
         let op_id = Self::next_op_id(&env);
