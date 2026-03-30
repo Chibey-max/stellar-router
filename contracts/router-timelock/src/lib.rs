@@ -68,6 +68,7 @@ pub enum TimelockError {
     NotCriticalOp = 14,
     InvalidConfig = 15,
     InvalidTarget = 16,
+    InvalidDescription = 17,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -150,6 +151,10 @@ impl RouterTimelock {
 
         if delay < min_delay {
             return Err(TimelockError::InvalidDelay);
+        }
+
+        if description.len() == 0 {
+            return Err(TimelockError::InvalidDescription);
         }
 
         let op_id = Self::next_op_id(&env);
@@ -535,6 +540,34 @@ impl RouterTimelock {
         Ok(())
     }
 
+    /// Cancel all pending operations. Emits `op_cancelled` per op and `all_cancelled` summary.
+    pub fn cancel_all(env: Env, caller: Address) -> Result<u64, TimelockError> {
+        caller.require_auth();
+        Self::require_admin(&env, &caller)?;
+
+        let next_id: u64 = env.storage().instance()
+            .get(&DataKey::NextOpId)
+            .unwrap_or(0);
+        let mut count: u64 = 0;
+        for id in 0..next_id {
+            if let Some(mut op) = env.storage().instance()
+                .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
+            {
+                if !op.executed && !op.cancelled {
+                    op.cancelled = true;
+                    env.storage().instance().set(&DataKey::Operation(id), &op);
+                    env.storage().instance().remove(&DataKey::OperationDeps(id));
+                    env.events().publish((Symbol::new(&env, "op_cancelled"),), id);
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            env.events().publish((Symbol::new(&env, "all_cancelled"),), count);
+        }
+        Ok(count)
+    }
+
     /// Configure the emergency council for fast-track operations.
     ///
     /// Sets the list of council member addresses and the required number of
@@ -650,13 +683,52 @@ impl RouterTimelock {
         let next_id = Self::next_op_id(&env);
         let mut pending = Vec::new(&env);
         for id in 0..next_id {
-            if let Some(op) = env.storage().instance().get::<_, Operation>(&DataKey::Operation(id)) {
+            if let Some(op) = env.storage().instance().get::<DataKey, TimelockOp>(&DataKey::Operation(id)) {
                 if !op.executed && !op.cancelled {
                     pending.push_back(op);
                 }
             }
         }
         pending
+    }
+
+    /// Returns the total number of operations ever queued (including executed and cancelled).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// The total operation count as `u64`.
+    pub fn get_op_count(env: Env) -> u64 {
+        env.storage().instance()
+            .get::<DataKey, u64>(&DataKey::NextOpId)
+            .unwrap_or(0)
+    }
+
+    /// Returns all operations matching the given state filter.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `only_pending` - If true, returns only ops where `!executed && !cancelled`.
+    ///   If false, returns all ops.
+    ///
+    /// # Returns
+    /// A [`Vec<TimelockOp>`] of matching operations in ID order (ascending).
+    pub fn get_ops_by_state(env: Env, only_pending: bool) -> Vec<TimelockOp> {
+        let count: u64 = env.storage().instance()
+            .get::<DataKey, u64>(&DataKey::NextOpId)
+            .unwrap_or(0);
+        let mut result = Vec::new(&env);
+        for id in 0..count {
+            if let Some(op) = env.storage().instance()
+                .get::<DataKey, TimelockOp>(&DataKey::Operation(id))
+            {
+                if !only_pending || (!op.executed && !op.cancelled) {
+                    result.push_back(op);
+                }
+            }
+        }
+        result
     }
 
     /// Get the minimum delay.
@@ -696,7 +768,9 @@ impl RouterTimelock {
         if new_delay == 0 {
             return Err(TimelockError::InvalidDelay);
         }
+        let old_delay: u64 = env.storage().instance().get(&DataKey::MinDelay).ok_or(TimelockError::NotInitialized)?;
         env.storage().instance().set(&DataKey::MinDelay, &new_delay);
+        env.events().publish((Symbol::new(&env, "min_delay_updated"),), (old_delay, new_delay));
         Ok(())
     }
 
@@ -793,7 +867,7 @@ impl RouterTimelock {
 mod tests {
     extern crate std;
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Env, String, Vec};
+    use soroban_sdk::{testutils::{Address as _, Events, Ledger}, Env, IntoVal, String, Vec};
 
     fn setup() -> (Env, Address, RouterTimelockClient<'static>) {
         let env = Env::default();
@@ -1196,5 +1270,102 @@ mod tests {
             client.try_set_fast_track_enabled(&attacker, &true),
             Err(Ok(TimelockError::Unauthorized))
         );
+    }
+
+    #[test]
+    fn test_get_op_count_zero_initially() {
+        let (_env, _admin, client) = setup();
+        assert_eq!(client.get_op_count(), 0);
+    }
+
+    #[test]
+    fn test_get_op_count_increments_on_queue() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps = Vec::new(&env);
+
+        client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
+        assert_eq!(client.get_op_count(), 1);
+
+        client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+        assert_eq!(client.get_op_count(), 2);
+    }
+
+    #[test]
+    fn test_get_ops_by_state_pending_only() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps = Vec::new(&env);
+
+        // Queue 3 ops
+        let id0 = client.queue(&admin, &String::from_str(&env, "fn0"), &target, &3600u64, &deps);
+        let id1 = client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
+        let id2 = client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+
+        // Execute id0 (advance time past delay)
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &id0);
+
+        // Cancel id1
+        client.cancel(&admin, &id1);
+
+        // Only id2 should be pending
+        let pending = client.get_ops_by_state(&true);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.get(0).unwrap().id, id2);
+    }
+
+    #[test]
+    fn test_get_ops_by_state_all() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps = Vec::new(&env);
+
+        // Queue 3 ops
+        let id0 = client.queue(&admin, &String::from_str(&env, "fn0"), &target, &3600u64, &deps);
+        let id1 = client.queue(&admin, &String::from_str(&env, "fn1"), &target, &3600u64, &deps);
+        client.queue(&admin, &String::from_str(&env, "fn2"), &target, &3600u64, &deps);
+
+        // Execute id0, cancel id1
+        env.ledger().with_mut(|l| l.timestamp += 3601);
+        client.execute(&admin, &id0);
+        client.cancel(&admin, &id1);
+
+        // All 3 ops should be returned
+        let all = client.get_ops_by_state(&false);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_set_min_delay_emits_event() {
+        let (env, admin, client) = setup();
+        client.set_min_delay(&admin, &7200);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "min_delay_updated"));
+        let (old, new): (u64, u64) = last.2.into_val(&env);
+        assert_eq!(old, 3600);
+        assert_eq!(new, 7200);
+    }
+
+    #[test]
+    fn test_cancel_all_emits_summary_event() {
+        let (env, admin, client) = setup();
+        let target = Address::generate(&env);
+        let deps = Vec::new(&env);
+        client.queue(&admin, &String::from_str(&env, "op0"), &target, &3600u64, &deps);
+        client.queue(&admin, &String::from_str(&env, "op1"), &target, &3600u64, &deps);
+
+        let count = client.cancel_all(&admin);
+        assert_eq!(count, 2);
+
+        let events = env.events().all();
+        let last = events.last().unwrap();
+        let topic: Symbol = last.1.get(0).unwrap().into_val(&env);
+        assert_eq!(topic, Symbol::new(&env, "all_cancelled"));
+        let emitted_count: u64 = last.2.into_val(&env);
+        assert_eq!(emitted_count, 2);
     }
 }
