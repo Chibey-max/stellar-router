@@ -115,19 +115,21 @@ macro_rules! require_admin_simple {
     };
 }
 
-/// Helper macro for transferring admin in contracts.
+/// Helper macro for completing the admin transfer after validation.
 ///
-/// Performs the standard admin transfer pattern:
-/// - Requires `current` to authenticate
-/// - Validates `current` is the admin
-/// - Sets `new_admin` as the new admin in storage
-/// - Publishes an `admin_transferred` event
+/// Use this in your transfer_admin function after you've already:
+/// - Called current.require_auth()
+/// - Called your own require_admin check
+///
+/// This macro:
+/// - Sets the new admin in storage
+/// - Publishes the admin_transferred event
 ///
 /// # Arguments
-/// * `$env` - The Soroban environment
-/// * `$current` - The current admin address (must authenticate and be admin)
-/// * `$new_admin` - The new admin address
-/// * `$error_type` - The error type (must have NotInitialized and Unauthorized variants)
+/// * `$env` - The Soroban environment reference
+/// * `$current` - The current admin address (Address)
+/// * `$new_admin` - The new admin address (Address)
+/// * `$data_key_expr` - Expression for the storage key containing admin (e.g., &DataKey::Admin)
 ///
 /// # Example
 /// ```ignore
@@ -136,19 +138,21 @@ macro_rules! require_admin_simple {
 ///     current: Address,
 ///     new_admin: Address,
 /// ) -> Result<(), MyError> {
-///     $crate::transfer_admin_helper!(&env, &current, &new_admin, MyError, DataKey::Admin)
+///     current.require_auth();
+///     Self::require_admin(&env, &current)?;
+///     router_common::admin_transfer_complete!(&env, &current, &new_admin, &DataKey::Admin);
+///     Ok(())
 /// }
 /// ```
 #[macro_export]
-macro_rules! transfer_admin_helper {
-    ($env:expr, $current:expr, $new_admin:expr, $error_type:ty, $data_key:expr) => {{
-        $current.require_auth();
-        $crate::require_admin_simple!($env, $current, $data_key, $error_type)?;
-        $env.storage().instance().set($data_key, $new_admin);
-        $env.events().publish(
-            (soroban_sdk::Symbol::new($env, "admin_transferred"),),
-            ($current, $new_admin),
-        );
-        Ok::<(), $error_type>(())
-    }};
+macro_rules! admin_transfer_complete {
+    ($env:expr, $current:expr, $new_admin:expr, $data_key_expr:expr) => {
+        {
+            $env.storage().instance().set($data_key_expr, $new_admin);
+            $env.events().publish(
+                (soroban_sdk::Symbol::new($env, "admin_transferred"),),
+                ($current, $new_admin),
+            );
+        }
+    };
 }
