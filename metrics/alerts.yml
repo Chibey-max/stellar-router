@@ -22,3 +22,45 @@ groups:
         annotations:
           summary: "Circuit breaker stuck open on route {{ $labels.route }}"
           description: "Circuit breaker has been open on route {{ $labels.route }} for more than 5 minutes. Manual intervention may be required to reset the circuit."
+
+      # Failure Rate Alerts
+      - alert: HighConsecutiveFailures
+        expr: router_middleware_failure_count > 10
+        for: 2m
+        labels:
+          severity: warning
+          component: middleware
+        annotations:
+          summary: "High consecutive failures on route {{ $labels.route }}"
+          description: "Route {{ $labels.route }} has {{ $value }} consecutive failures. Circuit breaker may trigger soon."
+
+      - alert: CriticalFailureCount
+        expr: router_middleware_failure_count > 20
+        for: 1m
+        labels:
+          severity: critical
+          component: middleware
+        annotations:
+          summary: "Critical failure count on route {{ $labels.route }}"
+          description: "Route {{ $labels.route }} has {{ $value }} consecutive failures. Immediate investigation required."
+
+      # Route Pause Alerts
+      - alert: RoutePaused
+        expr: router_core_route_paused == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: core
+        annotations:
+          summary: "Route {{ $labels.route }} is paused"
+          description: "Route {{ $labels.route }} has been paused for more than 5 minutes. Clients cannot access this route."
+
+      - alert: GlobalRouterPaused
+        expr: router_core_paused == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: core
+        annotations:
+          summary: "Global router pause activated"
+          description: "The stellar-router has been globally paused. All routing is blocked. This may indicate an incident or maintenance."
